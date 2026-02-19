@@ -33,8 +33,3 @@ formatters:
       local-prefixes:
         - github.com/be0x74a/kubectl-xctx
 
-exclusions:
-  rules:
-    - path: _test\.go
-      linters:
-        - gosec
