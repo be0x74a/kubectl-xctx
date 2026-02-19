@@ -22,10 +22,10 @@ kubectl krew install --manifest-url=https://raw.githubusercontent.com/be0x74a/kr
 ## Usage
 
 ```
-kubectl xctx [flags] <pattern> [-- kubectl args...]
+kubectl xctx [flags] <pattern> <kubectl args...>
 ```
 
-Use `--` to separate xctx flags from kubectl flags.
+xctx flags must come before the pattern. Everything after the pattern is passed directly to kubectl.
 
 ### Flags
 
@@ -35,25 +35,32 @@ Use `--` to separate xctx flags from kubectl flags.
 | `--list` | `-l` | false | List matching contexts without executing |
 | `--timeout` | `-t` | 0 | Per-context timeout (e.g. `10s`, `1m`). 0 = no timeout |
 | `--fail-fast` | | false | Stop after first failure (sequential mode only) |
+| `--header` | | `### Context: {context}` | Header template. Use `{context}` as placeholder, `""` to suppress |
 | `--version` | | | Print version |
 
 ### Examples
 
 ```bash
 # Get pods in all contexts matching "prod"
-kubectl xctx "prod" -- get pods
+kubectl xctx "prod" get pods
+
+# Get pods in a specific namespace
+kubectl xctx "prod" get pods -n kube-system
 
 # Get nodes across staging and dev contexts, in parallel
-kubectl xctx --parallel "staging|dev" -- get nodes
+kubectl xctx --parallel "staging|dev" get nodes
 
 # List which contexts would be selected
 kubectl xctx --list "prod"
 
 # Run with a per-context timeout (skip unreachable clusters)
-kubectl xctx --timeout 10s "." -- get pods -n kube-system
+kubectl xctx --timeout 10s "." get pods -n kube-system
 
 # Stop immediately on first failure
-kubectl xctx --fail-fast "prod" -- apply -f deployment.yaml
+kubectl xctx --fail-fast "prod" apply -f deployment.yaml
+
+# Suppress headers (useful for piping)
+kubectl xctx --header "" "prod" get pods -o json | jq .
 ```
 
 ### Output
