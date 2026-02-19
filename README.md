@@ -6,6 +6,8 @@
 
 A kubectl plugin to execute commands across multiple Kubernetes contexts matching a regular expression.
 
+![demo](demo.gif)
+
 ## Install via krew
 
 ```bash
