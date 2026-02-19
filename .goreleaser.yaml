@@ -1,0 +1,102 @@
+version: 2
+
+project_name: kubectl-xctx
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
+sboms:
+  - artifacts: archive
+
+brews:
+  - name: kubectl-xctx
+    repository:
+      owner: be0x74a
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    commit_msg_template: "homebrew formula update for {{ .ProjectName }} version {{ .Tag }}"
+    homepage: "https://github.com/be0x74a/kubectl-xctx"
+    description: "Execute kubectl commands across multiple contexts matching a regex"
+    install: |
+      bin.install "kubectl-xctx"
+    test: |
+      system "#{bin}/kubectl-xctx", "--version"
+    skip_upload: auto
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+krews:
+  - name: xctx
+    index:
+      owner: be0x74a
+      name: krew-index
+      token: "{{ .Env.KREW_INDEX_TOKEN }}"
+      branch: main
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    commit_msg_template: "krew plugin update for {{ .ProjectName }} version {{ .Tag }}"
+    folder: plugins
+    homepage: "https://github.com/be0x74a/kubectl-xctx"
+    short_description: "Execute kubectl commands across multiple contexts"
+    description: |
+      kubectl xctx runs a kubectl command across all Kubernetes contexts
+      whose name matches a regular expression, printing a labeled header
+      for each context's output.
+
+      Flags:
+        --parallel    Run across all contexts concurrently
+        --list        List matching contexts without executing
+        --timeout     Per-context timeout (e.g. 10s, 1m)
+        --fail-fast   Stop after first failure (sequential mode only)
+        --header      Header template ({context} placeholder, "" to suppress)
+
+      Examples:
+        kubectl xctx "prod" -- get pods
+        kubectl xctx --parallel "staging|dev" -- get nodes
+        kubectl xctx --header "" "prod" -- get pods -o json | jq .
+    skip_upload: auto
