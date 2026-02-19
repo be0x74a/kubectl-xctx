@@ -49,16 +49,17 @@ func newCmd() *cobra.Command {
 whose name matches a regular expression, printing a labeled header
 for each context's output.
 
-Use -- to separate xctx flags from kubectl flags:
-  kubectl xctx --parallel "prod" -- get pods -n kube-system
+xctx flags must come before the pattern; everything after the pattern
+is passed directly to kubectl.
 
 Examples:
-  kubectl xctx "prod" -- get pods
-  kubectl xctx --parallel "staging|dev" -- get nodes
-  kubectl xctx --timeout 10s "." -- get pods
+  kubectl xctx "prod" get pods
+  kubectl xctx --parallel "staging|dev" get nodes
+  kubectl xctx --timeout 10s "." get pods
   kubectl xctx --list "prod"
-  kubectl xctx --header "=== {context} ===" "prod" -- get pods
-  kubectl xctx --header "" "prod" -- get pods -o json | jq .`,
+  kubectl xctx "prod" get pods -n kube-system
+  kubectl xctx --header "=== {context} ===" "prod" get pods
+  kubectl xctx --header "" "prod" get pods -o json | jq .`,
 		Args:          cobra.MinimumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -72,6 +73,9 @@ Examples:
 	cmd.Flags().DurationVarP(&timeout, "timeout", "t", 0, "Per-context timeout (e.g. 10s, 1m). 0 = no timeout")
 	cmd.Flags().BoolVar(&failFast, "fail-fast", false, "Stop after first failure (sequential mode only)")
 	cmd.Flags().StringVar(&header, "header", "### Context: {context}", `Header printed before each context's output. Use {context} as the placeholder. Set to "" to suppress.`)
+	// Stop flag parsing at the first non-flag argument (the pattern), so that
+	// kubectl flags like -n are not interpreted as xctx flags.
+	cmd.Flags().SetInterspersed(false)
 
 	return cmd
 }

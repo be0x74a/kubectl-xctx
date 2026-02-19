@@ -43,8 +43,9 @@ signs:
 sboms:
   - artifacts: archive
 
-brews:
+homebrew_casks:
   - name: kubectl-xctx
+    directory: Casks
     repository:
       owner: be0x74a
       name: homebrew-tap
@@ -52,13 +53,9 @@ brews:
     commit_author:
       name: goreleaserbot
       email: bot@goreleaser.com
-    commit_msg_template: "homebrew formula update for {{ .ProjectName }} version {{ .Tag }}"
+    commit_msg_template: "homebrew cask update for {{ .ProjectName }} version {{ .Tag }}"
     homepage: "https://github.com/be0x74a/kubectl-xctx"
     description: "Execute kubectl commands across multiple contexts matching a regex"
-    install: |
-      bin.install "kubectl-xctx"
-    test: |
-      system "#{bin}/kubectl-xctx", "--version"
     skip_upload: auto
 
 changelog:
