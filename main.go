@@ -142,17 +142,17 @@ func runInContext(ctx context.Context, ctxName string, args []string) result {
 
 func printResult(r result, header string, out, errOut io.Writer) {
 	if header != "" {
-		fmt.Fprintln(out, strings.ReplaceAll(header, "{context}", r.ctxName))
+		_, _ = fmt.Fprintln(out, strings.ReplaceAll(header, "{context}", r.ctxName))
 	}
 	_, _ = out.Write(r.stdout)
 	if len(r.stderr) > 0 {
 		_, _ = errOut.Write(r.stderr)
 	}
 	if r.err != nil {
-		fmt.Fprintf(errOut, "[xctx] context %q failed: %v\n", r.ctxName, r.err)
+		_, _ = fmt.Fprintf(errOut, "[xctx] context %q failed: %v\n", r.ctxName, r.err)
 	}
 	if header != "" {
-		fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out)
 	}
 }
 
