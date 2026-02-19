@@ -1,3 +1,5 @@
+version: "2"
+
 run:
   timeout: 5m
 
@@ -9,23 +11,27 @@ linters:
     - ineffassign
     - staticcheck
     - unused
-    - gofmt
-    - goimports
     - revive
     - gosec
     - nilerr
     - misspell
+  settings:
+    gosec:
+      excludes:
+        - G204  # subprocess launched with variable — intentional for kubectl exec
+    revive:
+      rules:
+        - name: exported
+        - name: var-naming
 
-linters-settings:
-  goimports:
-    local-prefixes: github.com/be0x74a/kubectl-xctx
-  gosec:
-    excludes:
-      - G204  # subprocess launched with variable — intentional for kubectl exec
-  revive:
-    rules:
-      - name: exported
-      - name: var-naming
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/be0x74a/kubectl-xctx
 
 issues:
   exclude-rules:
