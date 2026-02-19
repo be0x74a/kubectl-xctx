@@ -1,6 +1,6 @@
 module github.com/be0x74a/kubectl-xctx
 
-go 1.22
+go 1.23
 
 require github.com/spf13/cobra v1.8.1
 

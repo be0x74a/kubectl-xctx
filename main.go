@@ -140,9 +140,9 @@ func printResult(r result, header string, out, errOut io.Writer) {
 	if header != "" {
 		fmt.Fprintln(out, strings.ReplaceAll(header, "{context}", r.ctxName))
 	}
-	out.Write(r.stdout)
+	_, _ = out.Write(r.stdout)
 	if len(r.stderr) > 0 {
-		errOut.Write(r.stderr)
+		_, _ = errOut.Write(r.stderr)
 	}
 	if r.err != nil {
 		fmt.Fprintf(errOut, "[xctx] context %q failed: %v\n", r.ctxName, r.err)

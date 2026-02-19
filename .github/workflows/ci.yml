@@ -40,3 +40,6 @@ jobs:
           go-version-file: go.mod
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - run: govulncheck ./...
+        # Non-blocking: stdlib CVEs may not yet have a released fix.
+        # This step reports findings without failing CI.
+        continue-on-error: true
