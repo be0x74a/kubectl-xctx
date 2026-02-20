@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -77,7 +78,62 @@ Examples:
 	// kubectl flags like -n are not interpreted as xctx flags.
 	cmd.Flags().SetInterspersed(false)
 
+	cmd.ValidArgsFunction = completeArgs
+
 	return cmd
+}
+
+// completeArgs provides shell completions for positional arguments.
+// With no args yet it suggests context names; once the pattern is provided
+// it delegates to kubectl's own completion for subcommands, resources, etc.
+func completeArgs(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) == 0 {
+		return completeContextNames(toComplete)
+	}
+	return completeKubectl(args[1:], toComplete)
+}
+
+// completeContextNames returns context names matching the partial input.
+func completeContextNames(toComplete string) ([]string, cobra.ShellCompDirective) {
+	out, _, err := kubectlRunner(context.Background(), "config", "get-contexts", "-o", "name")
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveError
+	}
+	var completions []string
+	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if name != "" && strings.HasPrefix(name, toComplete) {
+			completions = append(completions, name)
+		}
+	}
+	return completions, cobra.ShellCompDirectiveNoFileComp
+}
+
+// completeKubectl delegates completion to kubectl by calling
+// "kubectl __complete <args...> <toComplete>" and parsing its output.
+func completeKubectl(args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	completeArgs := append([]string{"__complete"}, args...)
+	completeArgs = append(completeArgs, toComplete)
+	out, _, err := kubectlRunner(context.Background(), completeArgs...)
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveDefault
+	}
+
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(lines) == 0 {
+		return nil, cobra.ShellCompDirectiveDefault
+	}
+
+	// Last line is the cobra directive (e.g. ":4"), preceding lines are completions.
+	directive := cobra.ShellCompDirectiveDefault
+	last := lines[len(lines)-1]
+	if strings.HasPrefix(last, ":") {
+		if v, err := strconv.Atoi(last[1:]); err == nil {
+			directive = cobra.ShellCompDirective(v)
+		}
+		lines = lines[:len(lines)-1]
+	}
+
+	return lines, directive
 }
 
 type result struct {

@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 )
 
 // mockKubectl replaces kubectlRunner for the duration of the test.
@@ -306,5 +309,81 @@ func TestMaybeWithTimeout_NonZero(t *testing.T) {
 		// expected
 	default:
 		t.Error("context should be done after timeout")
+	}
+}
+
+// --- completeArgs ---
+
+func TestCompleteArgs_ContextNames(t *testing.T) {
+	useFakeKubectl(t)
+	completions, dir := completeArgs(nil, nil, "prod")
+	if dir != cobra.ShellCompDirectiveNoFileComp {
+		t.Errorf("expected NoFileComp directive, got %d", dir)
+	}
+	if len(completions) != 2 {
+		t.Fatalf("expected 2 completions, got %d: %v", len(completions), completions)
+	}
+	for _, c := range completions {
+		if !strings.HasPrefix(c, "prod") {
+			t.Errorf("expected completion starting with 'prod', got %q", c)
+		}
+	}
+}
+
+func TestCompleteArgs_ContextNamesEmpty(t *testing.T) {
+	useFakeKubectl(t)
+	completions, _ := completeArgs(nil, nil, "")
+	if len(completions) != 4 {
+		t.Errorf("expected 4 completions for empty prefix, got %d: %v", len(completions), completions)
+	}
+}
+
+func TestCompleteArgs_ContextNamesNoMatch(t *testing.T) {
+	useFakeKubectl(t)
+	completions, _ := completeArgs(nil, nil, "zzz")
+	if len(completions) != 0 {
+		t.Errorf("expected 0 completions, got %d: %v", len(completions), completions)
+	}
+}
+
+func TestCompleteArgs_ContextNamesKubectlError(t *testing.T) {
+	mockKubectl(t, func(_ context.Context, _ ...string) ([]byte, []byte, error) {
+		return nil, nil, errors.New("kubectl not found")
+	})
+	_, dir := completeArgs(nil, nil, "")
+	if dir != cobra.ShellCompDirectiveError {
+		t.Errorf("expected Error directive on kubectl failure, got %d", dir)
+	}
+}
+
+func TestCompleteArgs_DelegatesToKubectl(t *testing.T) {
+	mockKubectl(t, func(_ context.Context, args ...string) ([]byte, []byte, error) {
+		if args[0] == "__complete" {
+			return []byte("pods\nservices\ndeployments\n:4\n"), nil, nil
+		}
+		return nil, nil, fmt.Errorf("unexpected call: %v", args)
+	})
+	completions, dir := completeArgs(nil, []string{"prod", "get"}, "")
+	if dir != cobra.ShellCompDirective(4) {
+		t.Errorf("expected directive 4, got %d", dir)
+	}
+	if len(completions) != 3 {
+		t.Fatalf("expected 3 completions, got %d: %v", len(completions), completions)
+	}
+	if completions[0] != "pods" {
+		t.Errorf("expected 'pods' first, got %q", completions[0])
+	}
+}
+
+func TestCompleteArgs_KubectlCompletionError(t *testing.T) {
+	mockKubectl(t, func(_ context.Context, args ...string) ([]byte, []byte, error) {
+		if args[0] == "__complete" {
+			return nil, nil, errors.New("completion failed")
+		}
+		return nil, nil, fmt.Errorf("unexpected call: %v", args)
+	})
+	_, dir := completeArgs(nil, []string{"prod", "get"}, "")
+	if dir != cobra.ShellCompDirectiveDefault {
+		t.Errorf("expected Default directive on error, got %d", dir)
 	}
 }

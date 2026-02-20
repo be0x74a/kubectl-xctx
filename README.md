@@ -79,6 +79,39 @@ NAME                    READY   STATUS    RESTARTS   AGE
 my-app-def456-uvw       1/1     Running   0          2d
 ```
 
+## Shell completion
+
+xctx supports tab completion for context names and kubectl commands. It uses kubectl's
+[plugin completion protocol](https://kubernetes.io/docs/tasks/extend-kubectl/kubectl-plugins/#using-the-command-line-runtime-package),
+which requires a `kubectl_complete-xctx` script on your `PATH`.
+
+**krew**
+
+```bash
+printf '#!/usr/bin/env sh\nkubectl-xctx __complete "$@"\n' > ~/.krew/bin/kubectl_complete-xctx
+chmod +x ~/.krew/bin/kubectl_complete-xctx
+```
+
+**Homebrew / manual install**
+
+The `kubectl_complete-xctx` script is included in every release archive. Place it
+in the same directory as the `kubectl-xctx` binary (e.g. `/usr/local/bin`).
+
+**Build from source**
+
+```bash
+make install          # installs both binary and completion script to /usr/local/bin
+# or with a custom prefix:
+make install PREFIX=~/.local/bin
+```
+
+Once installed, completions work out of the box in bash, zsh, and fish:
+
+```bash
+kubectl xctx <TAB>          # completes context names
+kubectl xctx "prod" <TAB>   # completes kubectl subcommands (get, apply, ...)
+```
+
 ## Build from source
 
 ```bash

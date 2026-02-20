@@ -21,6 +21,8 @@ builds:
 
 archives:
   - name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - kubectl_complete-xctx
     format_overrides:
       - goos: windows
         formats: [zip]
@@ -45,6 +47,9 @@ sboms:
 
 homebrew_casks:
   - name: kubectl-xctx
+    binaries:
+      - kubectl-xctx
+      - kubectl_complete-xctx
     directory: Casks
     repository:
       owner: be0x74a
@@ -95,4 +100,9 @@ krews:
         kubectl xctx "prod" -- get pods
         kubectl xctx --parallel "staging|dev" -- get nodes
         kubectl xctx --header "" "prod" -- get pods -o json | jq .
+    caveats: |
+      To enable shell completion for kubectl xctx, run:
+
+        printf '#!/usr/bin/env sh\nkubectl-xctx __complete "$@"\n' > ~/.krew/bin/kubectl_complete-xctx
+        chmod +x ~/.krew/bin/kubectl_complete-xctx
     skip_upload: auto
