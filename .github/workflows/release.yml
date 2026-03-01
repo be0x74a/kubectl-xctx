@@ -12,11 +12,11 @@ jobs:
       contents: write
       id-token: write  # required for cosign keyless signing
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -24,7 +24,7 @@ jobs:
 
       - uses: anchore/sbom-action/download-syft@v0
 
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@v7
         with:
           version: latest
           args: release --clean
