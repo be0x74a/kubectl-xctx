@@ -4,20 +4,29 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 )
 
-// mockKubectl replaces kubectlRunner for the duration of the test.
+// mockKubectl replaces kubectlRunner (and streamRunner, backed by the same fn)
+// for the duration of the test.
 func mockKubectl(t *testing.T, fn func(ctx context.Context, args ...string) ([]byte, []byte, error)) {
 	t.Helper()
-	orig := kubectlRunner
+	orig, origStream := kubectlRunner, streamRunner
 	kubectlRunner = fn
-	t.Cleanup(func() { kubectlRunner = orig })
+	streamRunner = func(ctx context.Context, args []string, out, errOut io.Writer) error {
+		stdout, stderr, err := fn(ctx, args...)
+		_, _ = out.Write(stdout)
+		_, _ = errOut.Write(stderr)
+		return err
+	}
+	t.Cleanup(func() { kubectlRunner, streamRunner = orig, origStream })
 }
 
 // fakeContextList is the standard set of contexts returned by the mock.
@@ -147,7 +156,7 @@ func TestPrintResult_StderrPropagated(t *testing.T) {
 // --- execute ---
 
 func TestExecute_InvalidRegex(t *testing.T) {
-	err := execute("[invalid", nil, false, false, 0, false, "")
+	err := execute("[invalid", nil, false, false, false, 0, false, "")
 	if err == nil {
 		t.Fatal("expected error for invalid regex, got nil")
 	}
@@ -155,7 +164,7 @@ func TestExecute_InvalidRegex(t *testing.T) {
 
 func TestExecute_NoMatch(t *testing.T) {
 	useFakeKubectl(t)
-	err := execute("nonexistent", []string{"get", "pods"}, false, false, 0, false, "### Context: {context}")
+	err := execute("nonexistent", []string{"get", "pods"}, false, false, false, 0, false, "### Context: {context}")
 	if err != nil {
 		t.Errorf("expected nil error for no-match case, got: %v", err)
 	}
@@ -163,7 +172,7 @@ func TestExecute_NoMatch(t *testing.T) {
 
 func TestExecute_NoCommand(t *testing.T) {
 	useFakeKubectl(t)
-	err := execute("prod", nil, false, false, 0, false, "### Context: {context}")
+	err := execute("prod", nil, false, false, false, 0, false, "### Context: {context}")
 	if err == nil {
 		t.Fatal("expected error when no kubectl command given, got nil")
 	}
@@ -233,6 +242,37 @@ func TestRunSequential_FailFast(t *testing.T) {
 	}
 	if callCount != 1 {
 		t.Errorf("fail-fast should stop after first failure, but kubectl was called %d times", callCount)
+	}
+}
+
+func TestRunSequential_LiveOutput(t *testing.T) {
+	original := streamRunner
+	t.Cleanup(func() { streamRunner = original })
+	written := make(chan struct{})
+	release := make(chan struct{})
+	streamRunner = func(_ context.Context, _ []string, out, _ io.Writer) error {
+		_, _ = io.WriteString(out, "live\n")
+		close(written)
+		<-release
+		return nil
+	}
+	var mu sync.Mutex
+	var out strings.Builder
+	w := &streamWriter{out: &out, mu: &mu}
+	done := make(chan error, 1)
+	go func() {
+		done <- runSequential([]string{"prod-a"}, []string{"logs", "-f"}, 0, false, "### Context: {context}", w, io.Discard)
+	}()
+	<-written
+	mu.Lock()
+	got := out.String()
+	mu.Unlock()
+	if got != "### Context: prod-a\nlive\n" {
+		t.Errorf("output not written live, got: %q", got)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -385,5 +425,203 @@ func TestCompleteArgs_KubectlCompletionError(t *testing.T) {
 	_, dir := completeArgs(nil, []string{"prod", "get"}, "")
 	if dir != cobra.ShellCompDirectiveDefault {
 		t.Errorf("expected Default directive on error, got %d", dir)
+	}
+}
+
+func TestStreamWriter(t *testing.T) {
+	for _, prefix := range []string{"[prod] ", ""} {
+		t.Run(prefix, func(t *testing.T) {
+			var out strings.Builder
+			writer := &streamWriter{out: &out, mu: &sync.Mutex{}, prefix: prefix}
+			for _, chunk := range []string{"first", " line\nsecond\n", "tail"} {
+				if count, err := io.WriteString(writer, chunk); err != nil || count != len(chunk) {
+					t.Fatalf("Write = %d, %v", count, err)
+				}
+			}
+			if !strings.Contains(out.String(), "second\n") {
+				t.Fatal("complete lines were buffered")
+			}
+			if err := writer.flush(); err != nil {
+				t.Fatal(err)
+			}
+			want := prefix + "first line\n" + prefix + "second\n" + prefix + "tail"
+			if out.String() != want {
+				t.Errorf("output = %q, want %q", out.String(), want)
+			}
+		})
+	}
+}
+
+func TestStreamWriter_SplitLines(t *testing.T) {
+	for _, prefixes := range [][2]string{{"[a] ", "[b] "}, {"", ""}} {
+		var out strings.Builder
+		var mu sync.Mutex
+		first := &streamWriter{out: &out, mu: &mu, prefix: prefixes[0]}
+		second := &streamWriter{out: &out, mu: &mu, prefix: prefixes[1]}
+		_, _ = io.WriteString(first, "split ")
+		_, _ = io.WriteString(second, "other\n")
+		_, _ = io.WriteString(first, "line\n")
+		if want := prefixes[1] + "other\n" + prefixes[0] + "split line\n"; out.String() != want {
+			t.Errorf("output = %q, want %q", out.String(), want)
+		}
+	}
+}
+
+func TestRunStreaming_Cancellation(t *testing.T) {
+	original := streamRunner
+	t.Cleanup(func() { streamRunner = original })
+	streamRunner = func(ctx context.Context, args []string, out, errOut io.Writer) error {
+		<-ctx.Done()
+		return errors.New("exit status 1")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var out, errOut strings.Builder
+	done := make(chan error, 1)
+	go func() {
+		done <- runStreaming(ctx, []string{"prod-a", "prod-b"}, []string{"get", "pods", "-w"}, "", &out, &errOut)
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("cancellation should not be a failure, got: %v", err)
+		}
+		if strings.Contains(errOut.String(), "failed") {
+			t.Errorf("unexpected failure report: %q", errOut.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("streams did not stop on cancellation")
+	}
+}
+
+func TestRunStreaming_ExitBeforeCancel(t *testing.T) {
+	// kubectl may exit on SIGINT slightly before xctx cancels ctx.
+	original := streamRunner
+	t.Cleanup(func() { streamRunner = original })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	streamRunner = func(context.Context, []string, io.Writer, io.Writer) error {
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			cancel()
+		}()
+		return errors.New("exit status 1")
+	}
+	var out, errOut strings.Builder
+	if err := runStreaming(ctx, []string{"prod-a"}, []string{"get", "pods", "-w"}, "", &out, &errOut); err != nil {
+		t.Errorf("cancellation should not be a failure, got: %v", err)
+	}
+}
+
+func TestRunStreaming_LiveConcurrentOutput(t *testing.T) {
+	original := streamRunner
+	t.Cleanup(func() { streamRunner = original })
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	streamRunner = func(ctx context.Context, args []string, out, errOut io.Writer) error {
+		if _, ok := ctx.Deadline(); ok {
+			return errors.New("unexpected deadline")
+		}
+		if strings.Join(args[2:], " ") != "logs -f" {
+			return fmt.Errorf("unexpected args: %v", args)
+		}
+		_, _ = io.WriteString(out, "live\n")
+		_, _ = io.WriteString(errOut, "warning\n")
+		started <- args[1]
+		<-release
+		return nil
+	}
+	var out, errOut strings.Builder
+	done := make(chan error, 1)
+	go func() {
+		done <- runStreaming(context.Background(), []string{"prod-a", "prod-b"}, []string{"logs", "-f"}, "header", &out, &errOut)
+	}()
+	for range []string{"prod-a", "prod-b"} {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			close(release)
+			<-done
+			t.Fatal("contexts did not start concurrently")
+		}
+	}
+	for _, name := range []string{"prod-a", "prod-b"} {
+		if !strings.Contains(out.String(), "["+name+"] live\n") || !strings.Contains(errOut.String(), "["+name+"] warning\n") {
+			t.Errorf("missing live output for %s: stdout=%q stderr=%q", name, out.String(), errOut.String())
+		}
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExecute_Stream(t *testing.T) {
+	useFakeKubectl(t)
+	called := make(chan string, 2)
+	streamRunner = func(ctx context.Context, args []string, out, errOut io.Writer) error {
+		if _, ok := ctx.Deadline(); !ok {
+			return errors.New("stream must honour timeout")
+		}
+		called <- args[1]
+		return errors.New("stream failed")
+	}
+	if err := execute("prod", []string{"logs", "-f"}, false, true, false, time.Minute, false, ""); err == nil || err.Error() != "2 context(s) failed" {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(called) != 2 {
+		t.Errorf("expected both contexts to run, got %d", len(called))
+	}
+}
+
+func TestNewCmd_StreamFlagConflicts(t *testing.T) {
+	for _, test := range []struct {
+		flag string
+		want string
+	}{
+		{"--parallel", "--stream and --parallel cannot be used together"},
+		{"-p", "--stream and --parallel cannot be used together"},
+		{"--fail-fast", "--fail-fast cannot be used with --stream"},
+	} {
+		t.Run(test.flag, func(t *testing.T) {
+			mockKubectl(t, func(context.Context, ...string) ([]byte, []byte, error) {
+				t.Error("kubectl must not run when flags conflict")
+				return nil, nil, nil
+			})
+			cmd := newCmd()
+			cmd.SetArgs([]string{"--stream", test.flag, "prod", "get", "pods", "-w"})
+			err := cmd.Execute()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Errorf("expected error containing %q, got: %v", test.want, err)
+			}
+		})
+	}
+}
+
+func TestExecute_StreamTimeoutNotFailure(t *testing.T) {
+	useFakeKubectl(t)
+	streamRunner = func(ctx context.Context, args []string, out, errOut io.Writer) error {
+		<-ctx.Done()
+		return errors.New("signal: killed")
+	}
+	if err := execute("prod", []string{"get", "pods", "-w"}, false, true, false, 10*time.Millisecond, false, ""); err != nil {
+		t.Errorf("timeout should not be a failure, got: %v", err)
+	}
+}
+
+func TestExecute_NoStreamDetection(t *testing.T) {
+	// Without --stream, watch commands run sequentially like any other.
+	useFakeKubectl(t)
+	var calls []string
+	streamRunner = func(_ context.Context, args []string, _, _ io.Writer) error {
+		calls = append(calls, args[1])
+		return nil
+	}
+	if err := execute("prod", []string{"get", "pods", "-w"}, false, false, false, 0, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(calls, ",") != "prod-us-east,prod-eu-west" {
+		t.Errorf("expected sequential calls in order, got %v", calls)
 	}
 }

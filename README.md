@@ -33,9 +33,10 @@ xctx flags must come before the pattern. Everything after the pattern is passed 
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--parallel` | `-p` | false | Run across all contexts concurrently |
+| `--parallel` | `-p` | false | Run across all contexts concurrently, buffering output per context |
+| `--stream` | | false | Run across all contexts concurrently, streaming live output prefixed with `[context]` |
 | `--list` | `-l` | false | List matching contexts without executing |
-| `--timeout` | `-t` | 0 | Per-context timeout (e.g. `10s`, `1m`). 0 = no timeout |
+| `--timeout` | `-t` | 0 | Per-context timeout (e.g. `10s`, `1m`). 0 = no timeout. With `--stream`, stops all streams after this duration |
 | `--fail-fast` | | false | Stop after first failure (sequential mode only) |
 | `--header` | | `### Context: {context}` | Header template. Use `{context}` as placeholder, `""` to suppress |
 | `--version` | | | Print version |
@@ -58,12 +59,24 @@ kubectl xctx --list "prod"
 # Run with a per-context timeout (skip unreachable clusters)
 kubectl xctx --timeout 10s "." get pods -n kube-system
 
+# Follow logs across all matching contexts (streams live, prefixed per context)
+kubectl xctx --stream "prod" logs -f -n my-ns -l app=my-app
+
+# Watch pods across all matching contexts for 30 seconds
+kubectl xctx --stream --timeout 30s "prod" get pods -w -n my-ns
+
 # Stop immediately on first failure
 kubectl xctx --fail-fast "prod" apply -f deployment.yaml
 
 # Suppress headers (useful for piping)
 kubectl xctx --header "" "prod" get pods -o json | jq .
 ```
+
+### Execution modes
+
+- **Sequential (default):** one context at a time. Each context's output is written live, as it arrives, under its header.
+- **`--parallel`:** all contexts concurrently. Output is buffered and printed grouped per context, in input order.
+- **`--stream`:** all contexts concurrently, with stdout and stderr written live and each line prefixed with `[context]` (`--header ""` drops the prefix; output stays line-buffered so contexts never mix mid-line). Use it for commands that don't exit on their own, such as `logs -f` or `get -w`. `--timeout` stops all streams after the given duration. It can't be combined with `--parallel` or `--fail-fast`. Streams ended by Ctrl+C or `--timeout` are not reported as failures.
 
 ### Output
 

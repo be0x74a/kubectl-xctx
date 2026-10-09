@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -28,6 +32,15 @@ var kubectlRunner = func(ctx context.Context, args ...string) (stdout, stderr []
 	return []byte(outBuf.String()), []byte(errBuf.String()), err
 }
 
+// streamRunner executes kubectl, copying output to out/errOut as it arrives.
+// Overridable in tests.
+var streamRunner = func(ctx context.Context, args []string, out, errOut io.Writer) error {
+	cmd := exec.CommandContext(ctx, "kubectl", args...)
+	cmd.Stdout = out
+	cmd.Stderr = errOut
+	return cmd.Run()
+}
+
 func main() {
 	if err := newCmd().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -37,6 +50,7 @@ func main() {
 
 func newCmd() *cobra.Command {
 	var parallel bool
+	var stream bool
 	var list bool
 	var timeout time.Duration
 	var failFast bool
@@ -50,12 +64,20 @@ func newCmd() *cobra.Command {
 whose name matches a regular expression, printing a labeled header
 for each context's output.
 
+Modes:
+  (default)   one context at a time, output written live under each header
+  --parallel  all contexts concurrently, output buffered and grouped per context
+  --stream    all contexts concurrently, output written live with each line
+              prefixed by [context]; for logs -f, get -w and similar
+
 xctx flags must come before the pattern; everything after the pattern
 is passed directly to kubectl.
 
 Examples:
   kubectl xctx "prod" get pods
   kubectl xctx --parallel "staging|dev" get nodes
+  kubectl xctx --stream "prod" logs -f -l app=my-app
+  kubectl xctx --stream --timeout 30s "prod" get pods -w
   kubectl xctx --timeout 10s "." get pods
   kubectl xctx --list "prod"
   kubectl xctx "prod" get pods -n kube-system
@@ -65,13 +87,20 @@ Examples:
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return execute(args[0], args[1:], parallel, list, timeout, failFast, header)
+			if stream && parallel {
+				return errors.New("--stream and --parallel cannot be used together (--stream already runs all contexts concurrently)")
+			}
+			if stream && failFast {
+				return errors.New("--fail-fast cannot be used with --stream (it only applies to sequential mode)")
+			}
+			return execute(args[0], args[1:], parallel, stream, list, timeout, failFast, header)
 		},
 	}
 
-	cmd.Flags().BoolVarP(&parallel, "parallel", "p", false, "Run across all contexts concurrently")
+	cmd.Flags().BoolVarP(&parallel, "parallel", "p", false, "Run across all contexts concurrently, buffering output per context")
+	cmd.Flags().BoolVar(&stream, "stream", false, "Run across all contexts concurrently, streaming live output prefixed with [context] (for logs -f, get -w, ...)")
 	cmd.Flags().BoolVarP(&list, "list", "l", false, "List matching contexts without executing")
-	cmd.Flags().DurationVarP(&timeout, "timeout", "t", 0, "Per-context timeout (e.g. 10s, 1m). 0 = no timeout")
+	cmd.Flags().DurationVarP(&timeout, "timeout", "t", 0, "Per-context timeout (e.g. 10s, 1m). 0 = no timeout. With --stream, stops all streams after this duration")
 	cmd.Flags().BoolVar(&failFast, "fail-fast", false, "Stop after first failure (sequential mode only)")
 	cmd.Flags().StringVar(&header, "header", "### Context: {context}", `Header printed before each context's output. Use {context} as the placeholder. Set to "" to suppress.`)
 	// Stop flag parsing at the first non-flag argument (the pattern), so that
@@ -143,7 +172,7 @@ type result struct {
 	err     error
 }
 
-func execute(pattern string, kubectlArgs []string, parallel, list bool, timeout time.Duration, failFast bool, header string) error {
+func execute(pattern string, kubectlArgs []string, parallel, stream, list bool, timeout time.Duration, failFast bool, header string) error {
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return fmt.Errorf("invalid pattern %q: %w", pattern, err)
@@ -168,6 +197,17 @@ func execute(pattern string, kubectlArgs []string, parallel, list bool, timeout 
 
 	if len(kubectlArgs) == 0 {
 		return fmt.Errorf("no kubectl command provided (use -- to separate kubectl args, e.g. kubectl xctx \"prod\" -- get pods)")
+	}
+
+	if stream {
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		if timeout > 0 {
+			var cancelTimeout context.CancelFunc
+			ctx, cancelTimeout = context.WithTimeout(ctx, timeout)
+			defer cancelTimeout()
+		}
+		return runStreaming(ctx, contexts, kubectlArgs, header, os.Stdout, os.Stderr)
 	}
 
 	if parallel {
@@ -215,11 +255,19 @@ func printResult(r result, header string, out, errOut io.Writer) {
 func runSequential(contexts, kubectlArgs []string, timeout time.Duration, failFast bool, header string, out, errOut io.Writer) error {
 	var failed int
 	for _, ctxName := range contexts {
+		if header != "" {
+			_, _ = fmt.Fprintln(out, strings.ReplaceAll(header, "{context}", ctxName))
+		}
 		ctx, cancel := maybeWithTimeout(timeout)
-		r := runInContext(ctx, ctxName, kubectlArgs)
+		err := streamRunner(ctx, append([]string{"--context", ctxName}, kubectlArgs...), out, errOut)
 		cancel()
-		printResult(r, header, out, errOut)
-		if r.err != nil {
+		if err != nil {
+			_, _ = fmt.Fprintf(errOut, "[xctx] context %q failed: %v\n", ctxName, err)
+		}
+		if header != "" {
+			_, _ = fmt.Fprintln(out)
+		}
+		if err != nil {
 			failed++
 			if failFast {
 				return fmt.Errorf("stopped after failure in context %q (%d context(s) failed)", ctxName, failed)
@@ -264,4 +312,105 @@ func maybeWithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
 		return context.WithTimeout(context.Background(), d)
 	}
 	return context.Background(), func() {}
+}
+
+type streamWriter struct {
+	out     io.Writer
+	mu      *sync.Mutex
+	prefix  string
+	pending []byte
+}
+
+func (w *streamWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.pending = append(w.pending, data...)
+	for {
+		newline := bytes.IndexByte(w.pending, '\n')
+		if newline < 0 {
+			break
+		}
+		if err := w.writeLine(w.pending[:newline+1]); err != nil {
+			return 0, err
+		}
+		w.pending = w.pending[newline+1:]
+	}
+	return len(data), nil
+}
+
+func (w *streamWriter) writeLine(line []byte) error {
+	if _, err := io.WriteString(w.out, w.prefix); err != nil {
+		return err
+	}
+	count, err := w.out.Write(line)
+	if err == nil && count != len(line) {
+		return io.ErrShortWrite
+	}
+	return err
+}
+
+func (w *streamWriter) flush() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.pending) == 0 {
+		return nil
+	}
+	err := w.writeLine(w.pending)
+	w.pending = nil
+	return err
+}
+
+// cancelGrace is how long a failed stream waits to see whether ctx is about to
+// be cancelled. kubectl gets the terminal's SIGINT too and may exit first.
+var cancelGrace = 100 * time.Millisecond
+
+// runStreaming runs all contexts concurrently with live, line-prefixed output.
+// Streams ended by ctx (Ctrl+C or --timeout) are not counted as failures.
+func runStreaming(ctx context.Context, contexts, kubectlArgs []string, header string, out, errOut io.Writer) error {
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	errors := make([]error, len(contexts))
+	for index, ctxName := range contexts {
+		wg.Add(1)
+		go func(index int, ctxName string) {
+			defer wg.Done()
+			var prefix string
+			if header != "" {
+				prefix = "[" + ctxName + "] "
+			}
+			stdout := &streamWriter{out: out, mu: &mu, prefix: prefix}
+			stderr := &streamWriter{out: errOut, mu: &mu, prefix: prefix}
+			errors[index] = streamRunner(ctx, append([]string{"--context", ctxName}, kubectlArgs...), stdout, stderr)
+			for _, writer := range []*streamWriter{stdout, stderr} {
+				if err := writer.flush(); errors[index] == nil {
+					errors[index] = err
+				}
+			}
+			if errors[index] != nil && ctx.Err() == nil {
+				select {
+				case <-ctx.Done():
+				case <-time.After(cancelGrace):
+				}
+			}
+			if ctx.Err() != nil {
+				errors[index] = nil
+			}
+			if errors[index] != nil {
+				mu.Lock()
+				_, _ = fmt.Fprintf(errOut, "[xctx] context %q failed: %v\n", ctxName, errors[index])
+				mu.Unlock()
+			}
+		}(index, ctxName)
+	}
+	wg.Wait()
+	var failed int
+	for _, err := range errors {
+		if err != nil {
+			failed++
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d context(s) failed", failed)
+	}
+	return nil
 }
